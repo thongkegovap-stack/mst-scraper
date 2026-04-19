@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import asyncio, aiohttp, pandas as pd, re, time, io
 from bs4 import BeautifulSoup
 
@@ -52,19 +52,23 @@ with col_title:
         unsafe_allow_html=True
     )
 
-# --- BACKEND ---
+# ================== SAFE HELPERS ==================
+def safe_value(tag):
+    return tag.get("value") if tag and tag.get("value") else ""
+
+
+# ================== BACKEND ==================
 async def get_params(session, url):
     try:
         async with session.get(url, ssl=False, timeout=10) as r:
             soup = BeautifulSoup(await r.text(), "lxml")
+
             return {
-                k: soup.find("input", {"name": v})
-                for k, v in {
-                    "n": "ctl00$nonceKeyFld",
-                    "h": "ctl00$hdParameter",
-                    "v": "__VIEWSTATE"
-                }.items()
+                "n": soup.find("input", {"name": "ctl00$nonceKeyFld"}),
+                "h": soup.find("input", {"name": "ctl00$hdParameter"}),
+                "v": soup.find("input", {"name": "__VIEWSTATE"})
             }
+
     except:
         return None
 
@@ -75,9 +79,11 @@ async def run_mst(session, mst, sem, p, url):
 
         payload = {
             "ctl00$SM": "ctl00$C$UpdatePanel1|ctl00$C$UC_PERS_LIST1$BtnFilter",
-            "__VIEWSTATE": p['v']["value"] if p.get('v') else "",
-            "ctl00$nonceKeyFld": p['n']["value"] if p.get('n') else "",
-            "ctl00$hdParameter": p['h']["value"] if p.get('h') else "",
+
+            "__VIEWSTATE": safe_value(p.get("v")),
+            "ctl00$nonceKeyFld": safe_value(p.get("n")),
+            "ctl00$hdParameter": safe_value(p.get("h")),
+
             "ctl00$C$UC_PERS_LIST1$ENTERPRISE_CODEFilterFld": mst_fmt,
             "__ASYNCPOST": "true",
             "ctl00$C$UC_PERS_LIST1$BtnFilter": "Tìm kiếm"
@@ -94,13 +100,16 @@ async def run_mst(session, mst, sem, p, url):
                         re.S
                     )
 
-                    soup = BeautifulSoup(match.group(1) if match else text, "lxml")
+                    if not match:
+                        return [{"MST_Gốc": mst_fmt, "Trạng_Thái": "Không phản hồi hợp lệ"}]
+
+                    soup = BeautifulSoup(match.group(1), "lxml")
                     table = soup.find("table", id=re.compile("UC_PERS_LIST1"))
 
                     if not table:
                         return [{"MST_Gốc": mst_fmt, "Trạng_Thái": "Không có dữ liệu"}]
 
-                    hdrs = [th.get_text(strip=True) for th in table.find_all("th")]
+                    headers = [th.get_text(strip=True) for th in table.find_all("th")]
 
                     return [
                         {
@@ -108,13 +117,14 @@ async def run_mst(session, mst, sem, p, url):
                             "Trạng_Thái": "Thành công",
                             **{
                                 h: re.sub(r"\s+", " ", td.get_text(strip=True))
-                                for h, td in zip(hdrs, tr.find_all("td"))
-                                if h and td.get_text(strip=True)
+                                for h, td in zip(headers, tr.find_all("td"))
+                                if h
                             }
                         }
                         for tr in table.find_all("tr")[1:]
                         if tr.find_all("td")
                     ]
+
             except:
                 await asyncio.sleep(0.5)
 
@@ -138,7 +148,7 @@ if btn_start:
         st.error("Vui lòng điền đầy đủ URL, Cookie và Upload file!")
     else:
 
-        # FIX TXT READ
+        # READ FILE
         if uploaded_file.name.endswith(".txt"):
             mst_list = uploaded_file.read().decode().splitlines()
         else:
@@ -158,15 +168,13 @@ if btn_start:
             async with aiohttp.ClientSession(
                 cookies=cookies,
                 connector=conn,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "X-Requested-With": "XMLHttpRequest"
-                }
+                headers={"User-Agent": "Mozilla/5.0"}
             ) as sess:
 
                 p = await get_params(sess, base_url)
+
                 if not p:
-                    return [{"Lỗi": "Không thể kết nối hoặc URL sai"}]
+                    return [{"Lỗi": "Không lấy được session / URL sai"}]
 
                 sem = asyncio.Semaphore(concurrency)
                 results, start, total = [], time.time(), len(mst_list)
@@ -205,5 +213,5 @@ if btn_start:
             "📥 Tải kết quả Excel",
             out.getvalue(),
             f"ketqua_{int(time.time())}.xlsx",
-            mime="application/vnd.ms-excel"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
